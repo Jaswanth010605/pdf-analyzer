@@ -134,3 +134,4 @@ if __name__ == "__main__":
         process_all_files_in_folder(folder_path)
         
 # pip install pandas openpyxl tabulate xlrd
+# https://g.co/gemini/share/a692daf238d3
