@@ -181,3 +181,5 @@ if uploaded_pdf:
                     os.remove(img_path)
         if os.path.exists(temp_path):
             os.remove(temp_path)
+
+#https://colab.research.google.com/drive/1xp8Dhfk5O8FwwrY3YJKHsA31hmtzpoV9?usp=sharing
