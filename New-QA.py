@@ -1,9 +1,7 @@
 import fitz  # PyMuPDF
 import os
 import requests
-import time
 import re
-from fpdf import FPDF
 import streamlit as st
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
@@ -105,20 +103,17 @@ def generate_question_local_llm(text, image_paths):
     prompt = f"""
 You are an AI tutor. Your task is to generate **high-quality, challenging questions** that require reasoning, comparison, or conceptual understanding. Avoid simple fact-based or one-line questions.
 
-Given the following educational content, create questions that:
-- Involve comparison (e.g., differences between data points or ideas)
-- Ask \"why\" or \"how\" something works
-- Involve interpretation of visual data (tables, charts, images)
-- Highlight important, deeper parts of the topic
+Given the following content, create questions that:
+ Involve comparison (e.g., differences between data points or ideas),Ask "why" or "how" something works, Involve interpretation of visual data (tables, charts, images) 
 
 Input Text:
 {text}
-
+    
 {"Attached images: " + ", ".join(image_paths) if image_paths else "No visual content."}
 
 Instructions:
 - DO NOT ask simple recall questions.
-- Prefer questions like \"What does this imply?\", \"How does X differ from Y?\", or \"Why is X significant in this context?\"
+- Prefer questions like "What does this imply?", "How does X differ from Y?", or "Why is X significant in this context?"
 - If content includes a table or image, analyze it to generate a more meaningful question than just asking for a value.
 - After all questions, provide clear, correct answers.
 - Just output the formatted questions followed by answers (no extra explanation or reasoning on how you built the question).
@@ -141,19 +136,12 @@ Q2: ...
     except requests.exceptions.RequestException as e:
         return f"[Error] Failed to generate: {str(e)}"
 
-# --- Save Q&A as a PDF ---
-def save_qna_to_pdf(pdf_path, qa_text):
-    filename = os.path.splitext(pdf_path)[0] + "_QnA.pdf"
-    pdf = FPDF()
-    pdf.add_page()
-    pdf.set_font("Arial", 'B', 14)
-    pdf.multi_cell(0, 10, f"Questions & Answers for {os.path.basename(pdf_path)}", align='C')
-    pdf.ln()
-
-    pdf.set_font("Arial", '', 12)
-    for line in qa_text.strip().split('\n'):
-        pdf.multi_cell(0, 10, line)
-    pdf.output(filename)
+# --- Save Q&A as a TXT file ---
+def save_qna_to_txt(pdf_path, qa_text):
+    filename = os.path.splitext(pdf_path)[0] + "_QnA.txt"
+    with open(filename, "w", encoding="utf-8") as f:
+        f.write(f"Questions & Answers for {os.path.basename(pdf_path)}\n\n")
+        f.write(qa_text.strip())
     return filename
 
 # --- Main processor for a single PDF ---
@@ -175,9 +163,9 @@ def process_single_pdf(pdf_path):
             all_qna_output.append(qna)
 
         combined_text = "\n\n".join(all_qna_output)
-        pdf_file = save_qna_to_pdf(pdf_path, combined_text)
-        print(f"[✅] Saved: {pdf_file}")
-        return pdf_file
+        txt_file = save_qna_to_txt(pdf_path, combined_text)
+        print(f"[✅] Saved: {txt_file}")
+        return txt_file
 
     finally:
         # Clean up temporary images
@@ -203,10 +191,10 @@ if folder_path and os.path.isdir(folder_path):
             st.write(f"🔍 Processing: `{pdf_file}`")
 
             try:
-                output_pdf = process_single_pdf(full_path)
-                st.success(f"✅ Saved: `{os.path.basename(output_pdf)}`")
-                st.download_button("⬇️ Download QnA PDF", open(output_pdf, "rb"), file_name=os.path.basename(output_pdf))
+                output_file = process_single_pdf(full_path)
+                st.success(f"✅ QnA TXT saved: `{os.path.basename(output_file)}`")
             except Exception as e:
                 st.error(f"❌ Failed to process `{pdf_file}`: {str(e)}")
 else:
     st.info("🔎 Please enter a valid folder path with PDF files.")
+#pip install streamlit pymupdf requests
