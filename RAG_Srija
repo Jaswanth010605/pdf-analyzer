@@ -1,0 +1,235 @@
+### Cell 1: Install Required Libraries
+!pip install PyMuPDF matplotlib docling pandas google-generativeai faiss-cpu sentence-transformers langchain transformers tqdm --quiet
+
+### Cell 2: Import Libraries
+import logging
+import time
+from pathlib import Path
+import pandas as pd
+from google.colab import files
+import google.generativeai as genai
+from docling.document_converter import DocumentConverter
+import fitz  # PyMuPDF
+import io
+from PIL import Image
+import matplotlib.pyplot as plt
+import os
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from sentence_transformers import SentenceTransformer
+import faiss
+from transformers import pipeline
+
+logging.basicConfig(level=logging.INFO)
+_log = logging.getLogger(__name__)
+
+### Cell 3: Configure Gemini API
+genai.configure(api_key="AIzaSyD-EXAMPLE-YOUR-KEY-HERE")# Replace with your actual API key
+
+### Cell 4: Global Variables and Model Setup
+faiss_index = None
+text_chunks = []
+embedder = SentenceTransformer('all-MiniLM-L6-v2')
+generator = pipeline('text2text-generation', model='google/flan-t5-base')
+
+### Cell 5: Define Chunking Function
+def chunk_text(text, chunk_size=500, chunk_overlap=50):
+    splitter = RecursiveCharacterTextSplitter(chunk_size=chunk_size, chunk_overlap=chunk_overlap)
+    return splitter.split_text(text)
+
+### Cell 6: Define FAISS Index Creation
+def create_vector_store(chunks):
+    global faiss_index
+    embeddings = embedder.encode(chunks)
+    dimension = embeddings.shape[1]
+    faiss_index = faiss.IndexFlatL2(dimension)
+    faiss_index.add(embeddings)
+    return chunks
+
+### Cell 7: Define Context Retrieval Function
+def retrieve_context(query, k=3):
+    query_embedding = embedder.encode([query])
+    distances, indices = faiss_index.search(query_embedding, k)
+    return [text_chunks[i] for i in indices[0]]
+
+### Cell 8: Interactive QA Session
+def interactive_qa():
+    while True:
+        user_question = input("\nAsk a question (type 'exit' to quit): ")
+        if user_question.lower() == 'exit':
+            break
+
+        retrieved = retrieve_context(user_question)
+        combined_context = " ".join(retrieved)
+
+        answer_prompt = f"Based on the following context, answer the question. Context: {combined_context} Question: {user_question}"
+        answer = generator(answer_prompt, max_length=200, truncation=True)[0]['generated_text']
+
+        print(f"\nAnswer: {answer}")
+        print("-"*80)
+
+### Cell 9: Table Description Function
+def generate_table_description(table_df: pd.DataFrame) -> str:
+    _log.info("Generating description with Gemini API...")
+    table_markdown = table_df.to_markdown(index=False)
+
+    model = genai.GenerativeModel('gemini-1.5-flash-latest')
+
+    prompt = f"""
+    You are a professional data analyst. Your job is to write a clear, concise, and insightful summary of the table provided. Your explanation should be easy for a general audience to understand, while still offering a complete understanding of the table's purpose and key details.
+
+    Here is the table data:
+    ---
+    {table_markdown}
+    ---
+    """
+
+    try:
+        response = model.generate_content(prompt)
+        return response.text
+    except Exception as e:
+        _log.error(f"Error communicating with Gemini API: {e}")
+        return "Error: Could not generate a description for this table."
+
+### Cell 10: Extract Tables
+def extract_tables(pdf_path: Path) -> dict:
+    results = {
+        'tables': [],
+        'output_files': []
+    }
+
+    output_dir = Path("extracted_tables")
+    output_dir.mkdir(parents=True, exist_ok=True)
+    doc_filename_stem = pdf_path.stem
+
+    try:
+        doc_converter = DocumentConverter()
+        conv_res = doc_converter.convert(pdf_path)
+
+        _log.info(f"Found {len(conv_res.document.tables)} tables in the document.")
+
+        for table_ix, table in enumerate(conv_res.document.tables):
+            table_number = table_ix + 1
+            table_df = table.export_to_dataframe()
+            description = generate_table_description(table_df)
+
+            base_name = f"{doc_filename_stem}-table-{table_number}"
+            csv_path = output_dir / f"{base_name}.csv"
+            html_path = output_dir / f"{base_name}.html"
+            desc_path = output_dir / f"{base_name}-description.txt"
+
+            table_df.to_csv(csv_path, index=False)
+            with html_path.open("w", encoding="utf-8") as fp:
+                fp.write(table.export_to_html(doc=conv_res.document))
+            with desc_path.open("w") as f:
+                f.write(description)
+
+            results['tables'].append({
+                'number': table_number,
+                'dataframe': table_df,
+                'description': description,
+                'csv_path': csv_path,
+                'html_path': html_path,
+                'desc_path': desc_path
+            })
+            results['output_files'].extend([csv_path, html_path, desc_path])
+
+    except Exception as e:
+        _log.error(f"Error during table extraction: {e}")
+
+    return results
+
+### Cell 11: Extract Images
+def extract_images(pdf_bytes: bytes, pdf_name: str) -> dict:
+    results = {
+        'images': [],
+        'output_files': []
+    }
+
+    image_dir = Path("extracted_images")
+    image_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        doc = fitz.open(stream=pdf_bytes, filetype="pdf")
+
+        for page_index in range(len(doc)):
+            page = doc[page_index]
+            images = page.get_images(full=True)
+
+            for img_index, img in enumerate(images):
+                xref = img[0]
+                base_image = doc.extract_image(xref)
+                image_bytes = base_image["image"]
+                image_ext = base_image["ext"]
+
+                image = Image.open(io.BytesIO(image_bytes))
+                save_path = image_dir / f"{pdf_name}_page{page_index+1}_img{img_index+1}.{image_ext}"
+                image.save(save_path)
+
+                results['images'].append({
+                    'page': page_index + 1,
+                    'index': img_index + 1,
+                    'image': image,
+                    'path': save_path
+                })
+                results['output_files'].append(save_path)
+
+        doc.close()
+
+    except Exception as e:
+        _log.error(f"Error during image extraction: {e}")
+
+    return results
+
+### Cell 12: Upload File
+def upload_pdf_file():
+    uploaded = files.upload()
+    if not uploaded:
+        _log.warning("No PDF file uploaded. Exiting.")
+        return None, None
+
+    file_path = list(uploaded.keys())[0]
+    pdf_path = Path(file_path)
+
+    with open(file_path, "rb") as f:
+        pdf_bytes = f.read()
+
+    return pdf_path, pdf_bytes
+
+### Cell 13: Main Pipeline
+def main():
+    logging.basicConfig(level=logging.INFO)
+    _log.info("Starting PDF processing...")
+
+    pdf_path, pdf_bytes = upload_pdf_file()
+    if not pdf_path:
+        return
+
+    start_time = time.time()
+
+    _log.info("Extracting tables...")
+    table_results = extract_tables(pdf_path)
+
+    _log.info("Extracting images...")
+    image_results = extract_images(pdf_bytes, pdf_path.stem)
+
+    full_text = ""
+    for table in table_results.get('tables', []):
+        full_text += table['dataframe'].to_string(index=False) + "\n" + table['description'] + "\n"
+
+    for img in image_results.get('images', []):
+        full_text += f"[Image on Page {img['page']}]\n"
+
+    global text_chunks
+    text_chunks = chunk_text(full_text)
+    create_vector_store(text_chunks)
+
+    _log.info(f"RAG system ready. You can now ask questions.")
+    print("\nYou can now ask questions based on the PDF content.")
+    print("Type 'exit' to stop the QA system.")
+
+    interactive_qa()
+
+    _log.info(f"Process completed in {time.time()-start_time:.2f} seconds")
+
+### Cell 14: Run the Pipeline
+main()
