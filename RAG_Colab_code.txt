@@ -1,0 +1,199 @@
+# =========================
+# 📦 INSTALL DEPENDENCIES
+# =========================
+!pip install -q langchain faiss-cpu PyMuPDF sentence-transformers google-generativeai
+!pip install -U langchain-community
+!pip install -U langchain-huggingface
+
+# =========================
+# 🔧 IMPORT & CONFIGURE
+# =========================
+import os
+import fitz  # PyMuPDF
+import json
+import google.generativeai as genai
+from langchain.schema import Document
+from langchain_huggingface import HuggingFaceEmbeddings
+from langchain.vectorstores import FAISS
+
+# 🔐 Set your Gemini API key
+api_key = "API_KEY_HERE"  # <-- Replace this
+
+try:
+    genai.configure(api_key=api_key)
+except Exception as e:
+    print(f"Error configuring Gemini API: {e}")
+
+model = genai.GenerativeModel("gemini-2.0-flash")
+
+# =========================
+# 📄 PDF TEXT EXTRACTION
+# =========================
+def extract_pdfs(folder_path):
+    pdf_texts = []
+    if not os.path.exists(folder_path):
+        print(f"Error: Folder not found at {folder_path}")
+        return pdf_texts
+    print(f"Listing contents of {folder_path}:")
+    try:
+        for item in os.listdir(folder_path):
+            print(item)
+    except Exception as e:
+        print(f"Error listing directory contents: {e}")
+
+    for file in os.listdir(folder_path):
+        if file.endswith(".pdf"):
+            full_text = ""
+            path = os.path.join(folder_path, file)
+            try:
+                doc = fitz.open(path)
+                for i, page in enumerate(doc):
+                    full_text += f"\n\n--- Page {i+1} ---\n" + page.get_text()
+                pdf_texts.append({
+                    "source": file,
+                    "text": full_text
+                })
+            except Exception as e:
+                print(f"Error processing PDF file {file}: {e}")
+    return pdf_texts
+
+# =========================
+# 🤖 GEMINI CHUNKING
+# =========================
+import re
+
+def gemini_chunk(pdf_obj):
+    prompt = f"""
+Split the following PDF content into meaningful sections based on topics or structure.
+
+Return the result as sections with:
+1. A title
+2. The actual content
+
+Format each section like this:
+
+### Title: <Your Section Title>
+
+<Section Content Text>
+
+PDF TEXT:
+\"\"\"
+{pdf_obj['text']}
+\"\"\"
+"""
+    try:
+        response = model.generate_content(prompt)
+        raw_output = response.text
+
+        # Parse using regex instead of JSON
+        pattern = r"### Title:\s*(.*?)\n+(.*?)(?=\n### Title:|\Z)"
+        matches = re.findall(pattern, raw_output, re.DOTALL)
+
+        documents = []
+        for title, content in matches:
+            content = content.strip()
+            if content:
+                documents.append(
+                    Document(
+                        page_content=content,
+                        metadata={
+                            "source": pdf_obj["source"],
+                            "section_title": title.strip()
+                        }
+                    )
+                )
+
+        if not documents:
+            print(f"⚠️ No valid sections extracted from: {pdf_obj['source']}")
+        return documents
+
+    except Exception as e:
+        print(f"❌ Error processing chunking for {pdf_obj['source']}: {e}")
+        return []
+
+# =========================
+# 📚 CHUNK + STORE
+# =========================
+def chunk_all_with_gemini(folder_path):
+    all_docs = []
+    pdfs = extract_pdfs(folder_path)
+    if not pdfs:
+        print("No PDFs found or extracted successfully.")
+        return []
+    for pdf in pdfs:
+        print(f"📖 Chunking: {pdf['source']}")
+        chunks = gemini_chunk(pdf)
+        all_docs.extend(chunks)
+    return all_docs
+
+def store_vectorstore(docs):
+    if not docs:
+        print("No documents to store in vectorstore.")
+        return None
+    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    vectorstore = FAISS.from_documents(docs, embeddings)
+    return vectorstore
+
+# =========================
+# 🔍 GENERAL RETRIEVER
+# =========================
+class GeneralRetriever:
+    def __init__(self, vectorstore):
+        self.vectorstore = vectorstore
+
+    def get_relevant_documents(self, query):
+        if not self.vectorstore:
+            print("Vectorstore not initialized.")
+            return []
+        return self.vectorstore.similarity_search(query, k=20)
+
+# =========================
+# 🧠 GEMINI QA FROM VECTORSTORE
+# =========================
+def gemini_answer(query, retriever):
+    if not retriever or not retriever.vectorstore:
+        print("Retriever or vectorstore not initialized. Cannot answer query.")
+        return "Error: Cannot answer query."
+
+    relevant_docs = retriever.get_relevant_documents(query)
+
+    context = "\n\n".join(
+        f"[{doc.metadata.get('source')} - {doc.metadata.get('section_title', 'Section')}]\n{doc.page_content}"
+        for doc in relevant_docs
+    )
+
+    prompt = f"""
+Answer the following question based only on the context provided below.
+
+Context:
+\"\"\"
+{context}
+\"\"\"
+
+Question:        
+{query}
+"""
+    response = model.generate_content(prompt)
+    return response.text
+
+# =========================
+# 🚀 RUN THE PIPELINE
+# =========================
+
+# Step 1: 📁 Define your folder path in Colab (must exist and contain PDFs)
+pdf_folder_path = "/content/pdf_folder"  # <-- Change this to your actual folder path
+
+# Step 2: 🔄 Chunk and embed
+docs = chunk_all_with_gemini(pdf_folder_path)
+vectorstore = store_vectorstore(docs)
+
+# Step 3 & 4: Ask user for a question and answer if vectorstore exists
+if vectorstore:
+    user_query = input("❓ Enter your question: ")
+    retriever = GeneralRetriever(vectorstore)
+    answer = gemini_answer(user_query, retriever)
+    print(f"\n✅ Answer:\n{answer}")
+else:
+    print("\nPipeline stopped due to no documents being processed.")
+
+#https://colab.research.google.com/drive/1ieKajYRCffdpgPDLes8CdYIVwL6MDjSd?usp=sharing
